@@ -49,9 +49,6 @@ credentials.json
 .DS_Store
 Thumbs.db
 
-# Logs
-*.log
-
 # Testing
 .pytest_cache/
 .coverage
@@ -59,3 +56,11 @@ htmlcov/
 
 # Jupyter Notebooks
 .ipynb_checkpoints
+
+# Lambda deployment artifacts
+lambda_timeback_deployment*.zip
+*.zip
+
+# Logs
+logs/
+*.log
