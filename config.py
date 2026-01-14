@@ -1,0 +1,4 @@
+APP_IDS_GSHEET='1OTxjq2KHtjou3wSgaHpCKR1g_vvvFoEtOzyMAJPvwpw'
+GOOGLE_CHAT_WEBHOOK_URL='https://chat.googleapis.com/v1/spaces/AAQAPlyPHC0/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=-qDtLWUNKduyDHCe8qr6tjG0kd4VcagZAd2GYr1SF6I'
+PROGRAM_TRACKERS_FOLDER='1TKw2kjHiIcmaAPvotN45HaIhy2LjHkYO'
+HUBSPOT_TRACKER_PROPERTY='tracker_link'
