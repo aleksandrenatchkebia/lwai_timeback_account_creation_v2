@@ -39,13 +39,6 @@ def main():
         # Filter out leads from inactive segments
         df_filtered_leads = filter_leads_by_active_segments(df_filtered_leads)
         
-        # TESTING: Random selector to limit number of leads for testing
-        # Comment out this block for production
-        TEST_LIMIT = 1
-        if len(df_filtered_leads) > TEST_LIMIT:
-            df_filtered_leads = df_filtered_leads.sample(n=TEST_LIMIT, random_state=123)
-            print(f"TESTING MODE: Limited to {TEST_LIMIT} leads for testing")
-        
         # Empty data handling: Check if we have any leads to process
         total_students = len(df_filtered_leads)
         print(f"Leads to process: {total_students}")
@@ -92,7 +85,7 @@ def main():
         
         # TESTING MODE: Set to True to skip TimeBack account creation but still test trackers and HubSpot
         # This allows testing tracker creation and HubSpot updates without creating real accounts
-        SKIP_ACCOUNT_CREATION = True  # Set to False for production
+        SKIP_ACCOUNT_CREATION = False  # Set to False for production
         
         # Execute API calls to create accounts and assignments
         execution_summary, success_logs, fail_logs, tracker_results, student_data_dict = execute_and_log(

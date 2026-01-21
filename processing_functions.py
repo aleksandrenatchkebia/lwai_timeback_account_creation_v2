@@ -84,6 +84,7 @@ def load_configuration_data():
     offset = 0
     limit = 100
     
+    # First, try paginated fetch
     while True:
         response = requests.get(f"{apps_url}?limit={limit}&offset={offset}", headers=headers)
         response.raise_for_status()
@@ -95,10 +96,39 @@ def load_configuration_data():
             if app_name and app_id:
                 apps_dict[app_name] = app_id
         
-        if not data.get('pagination', {}).get('hasMore', False):
+        pagination = data.get('pagination', {})
+        if not pagination.get('hasMore', False):
             break
         
         offset += limit
+    
+    # If we need specific apps that weren't found, search for them by name
+    # This handles cases where pagination doesn't return all apps
+    # Get list of apps we need from config
+    needed_apps = set(config_df['app'].dropna().unique())
+    missing_apps = needed_apps - set(apps_dict.keys())
+    
+    if missing_apps:
+        import urllib.parse
+        for app_name in missing_apps:
+            # Search for the app by exact name
+            filter_value = f"name='{app_name}'"
+            encoded_filter = urllib.parse.quote(filter_value, safe="=")
+            search_url = f"{apps_url}?filter={encoded_filter}"
+            
+            try:
+                search_response = requests.get(search_url, headers=headers, timeout=10)
+                search_response.raise_for_status()
+                search_data = search_response.json()
+                
+                for app in search_data.get('applications', []):
+                    found_name = app.get('name', '')
+                    found_id = app.get('sourcedId', '')
+                    if found_name == app_name and found_id:
+                        apps_dict[found_name] = found_id
+                        print(f"  Found missing app via search: {found_name}")
+            except Exception as e:
+                print(f"  Warning: Could not search for app '{app_name}': {e}")
     
     return config_df, assessments_df, apps_dict
 
@@ -351,8 +381,14 @@ def process_student(student_row, config_df, assessments_df, apps_dict):
         # Create assessment assignment payloads if assessments are enabled
         if assessments_enabled:
             # Filter assessments for this segment and grade
-            # Empty grade means all students in that segment get the assessment regardless of grade
-            grade_filter = assessments_df['grade'].isna() | (assessments_df['grade'] == current_grade)
+            # Empty grade (NaN) means all students in that segment get the assessment regardless of grade
+            # If assessment grade is NaN, assign it regardless of student grade
+            # Otherwise, only assign if assessment grade matches student's current grade
+            if current_grade is not None:
+                grade_filter = assessments_df['grade'].isna() | (assessments_df['grade'] == current_grade)
+            else:
+                # If student grade is unknown, only assign assessments with empty grade (NaN)
+                grade_filter = assessments_df['grade'].isna()
             
             # Filter by segment if segment column exists
             if 'segment' in assessments_df.columns:
@@ -363,8 +399,17 @@ def process_student(student_row, config_df, assessments_df, apps_dict):
                 matching_assessments = assessments_df[grade_filter]
             
             for _, assessment_row in matching_assessments.iterrows():
-                assessment_id = assessment_row.get('ID') or assessment_row.get('id')
-                assessment_name = assessment_row.get('assessment', '') or assessment_row.get('name', '')
+                # Use the actual column names from the sheet, with fallbacks for backward compatibility
+                assessment_id = (
+                    assessment_row.get('initial_assessment_id')
+                    or assessment_row.get('ID')
+                    or assessment_row.get('id')
+                )
+                assessment_name = (
+                    assessment_row.get('assessment_name', '')
+                    or assessment_row.get('assessment', '')
+                    or assessment_row.get('name', '')
+                )
                 
                 # Skip if assessment ID is missing
                 if not assessment_id or pd.isna(assessment_id):

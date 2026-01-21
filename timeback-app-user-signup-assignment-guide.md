@@ -155,11 +155,13 @@ GET /applications/1.0
 
 ### Applications Response Structure
 
+**Note**: As of recent platform updates, tools have been flattened into applications. Each application now directly represents what was previously a tool, and you access the `sourcedId` directly from the application object.
+
 ```json
 {
   "applications": [
     {
-      "sourcedId": "string", // Application ID for profile assignment
+      "sourcedId": "string", // Application ID for profile assignment (use this directly)
       "status": "active",
       "dateCreated": "2024-01-01T00:00:00Z",
       "dateLastModified": "2024-01-01T00:00:00Z",
@@ -168,17 +170,10 @@ GET /applications/1.0
       "description": "Application description",
       "logoUrl": "https://example.com/logo.png",
       "coverImageUrl": "https://example.com/cover.png",
-      "tools": [
-        {
-          "sourcedId": "string", // Tool ID
-          "name": "Tool Name",
-          "description": "Tool description",
-          "toolType": "learning_app", // or "assessment"
-          "launchUrl": "https://example.com/launch",
-          "isLtiCompliant": true,
-          "isLtiV1P3Compliant": true
-        }
-      ]
+      "applicationType": "learning_app", // or "assessment"
+      "launchUrl": "https://example.com/launch",
+      "isLtiCompliant": true,
+      "isLtiV1P3Compliant": true
     }
   ],
   "pagination": {
@@ -189,6 +184,8 @@ GET /applications/1.0
   }
 }
 ```
+
+**Important**: Use `application.sourcedId` directly for profile assignments. The old nested `tools` array structure is no longer used.
 
 ### Find Applications Example
 

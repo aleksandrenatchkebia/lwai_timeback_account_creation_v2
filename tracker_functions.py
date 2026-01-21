@@ -55,7 +55,7 @@ def extract_spreadsheet_id_from_url(url):
     return url
 
 
-def create_tracker_copy_by_app(student_email, app_name, signup_date, df_trackers, client):
+def create_tracker_copy_by_app(student_email, app_name, signup_date, df_trackers, client, segment=None, current_grade=None):
     """
     Create a copy of the tracker spreadsheet for a student.
     
@@ -65,25 +65,77 @@ def create_tracker_copy_by_app(student_email, app_name, signup_date, df_trackers
         signup_date: Date when lead signed up (datetime object or string)
         df_trackers: DataFrame with program tracker information
         client: gspread Client object
+        segment: Optional segment name to match against 'Segment' column
+        current_grade: Optional current grade (last completed + 1) to match against 'Grade' column
         
     Returns:
         tuple: (success: bool, tracker_url: str, error_message: str)
     """
     try:
-        # Find the tracker template for this app
-        # The program_trackers worksheet has 'App' column
+        # Start with all trackers for this app
         app_trackers = df_trackers[df_trackers['App'] == app_name]
         
         if app_trackers.empty:
             return False, None, f"No tracker template found for app '{app_name}'"
         
-        # Get the first non-empty tracker URL for this app
+        # Multi-level matching with fallback:
+        # 1. Try App + Segment + Grade (if all available)
+        # 2. Try App + Segment (if Segment available)
+        # 3. Try App only (fallback)
+        
         tracker_row = None
-        for idx, row in app_trackers.iterrows():
-            tracker_url = row.get('Tracker') or row.get('tracker') or row.get('tracker_url')
-            if tracker_url and pd.notna(tracker_url) and str(tracker_url).strip():
-                tracker_row = row
-                break
+        
+        # Check if Segment and Grade columns exist
+        has_segment_col = 'Segment' in df_trackers.columns
+        has_grade_col = 'Grade' in df_trackers.columns
+        
+        # Level 1: Try App + Segment + Grade match
+        if has_segment_col and has_grade_col and segment is not None and current_grade is not None:
+            # Filter by Segment and Grade
+            segment_match = app_trackers['Segment'].fillna('').astype(str).str.strip() == str(segment).strip()
+            grade_match = pd.to_numeric(app_trackers['Grade'], errors='coerce') == current_grade
+            
+            # Only match rows where Segment and Grade are both specified (not NaN/empty)
+            segment_specified = app_trackers['Segment'].notna() & (app_trackers['Segment'].astype(str).str.strip() != '')
+            grade_specified = app_trackers['Grade'].notna()
+            
+            # Match where Segment and Grade match AND are specified
+            exact_match = segment_match & grade_match & segment_specified & grade_specified
+            
+            if exact_match.any():
+                matching_trackers = app_trackers[exact_match]
+                # Get first match with non-empty tracker URL
+                for idx, row in matching_trackers.iterrows():
+                    tracker_url = row.get('Tracker') or row.get('tracker') or row.get('tracker_url')
+                    if tracker_url and pd.notna(tracker_url) and str(tracker_url).strip():
+                        tracker_row = row
+                        break
+        
+        # Level 2: Try App + Segment match (if Level 1 didn't find anything)
+        if tracker_row is None and has_segment_col and segment is not None:
+            segment_match = app_trackers['Segment'].fillna('').astype(str).str.strip() == str(segment).strip()
+            segment_specified = app_trackers['Segment'].notna() & (app_trackers['Segment'].astype(str).str.strip() != '')
+            
+            # Match where Segment matches AND is specified (Grade can be NaN/empty)
+            segment_only_match = segment_match & segment_specified
+            
+            if segment_only_match.any():
+                matching_trackers = app_trackers[segment_only_match]
+                # Get first match with non-empty tracker URL
+                for idx, row in matching_trackers.iterrows():
+                    tracker_url = row.get('Tracker') or row.get('tracker') or row.get('tracker_url')
+                    if tracker_url and pd.notna(tracker_url) and str(tracker_url).strip():
+                        tracker_row = row
+                        break
+        
+        # Level 3: Fallback to App only (if previous levels didn't find anything)
+        if tracker_row is None:
+            # Get the first non-empty tracker URL for this app (ignoring Segment/Grade)
+            for idx, row in app_trackers.iterrows():
+                tracker_url = row.get('Tracker') or row.get('tracker') or row.get('tracker_url')
+                if tracker_url and pd.notna(tracker_url) and str(tracker_url).strip():
+                    tracker_row = row
+                    break
         
         if tracker_row is None:
             return False, None, f"No tracker URL found for app '{app_name}'"
@@ -240,13 +292,16 @@ def create_trackers_for_students(success_logs, student_data_dict, config_df=None
         else:
             course_grade = "Unknown"
         
-        # Create tracker copy using app name to find tracker
+        # Create tracker copy using app name, segment, and current grade to find tracker
+        # Note: grade here is already current_grade (last_completed + 1) from processing phase
         success, tracker_url, error = create_tracker_copy_by_app(
             student_email=email,
             app_name=app_name,
             signup_date=signup_date,
             df_trackers=df_trackers,
-            client=client
+            client=client,
+            segment=segment,
+            current_grade=int(grade) if grade is not None else None
         )
         
         tracker_results.append({

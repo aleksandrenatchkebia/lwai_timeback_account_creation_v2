@@ -37,6 +37,55 @@ def get_timeback_access_token():
     return response.json()['access_token']
 
 
+def get_user_id_by_email(email, access_token):
+    """
+    Look up user ID by email address from TimeBack API.
+    
+    Args:
+        email: User email address
+        access_token: TimeBack API access token
+        
+    Returns:
+        tuple: (success: bool, user_id: str or None, error_message: str)
+    """
+    endpoint = os.getenv('TIMEBACK_PLATFORM_REST_ENDPOINT')
+    users_url = f"{endpoint}/rostering/1.0/users"
+    
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        # Search for user by email
+        import urllib.parse
+        filter_value = f"email='{email}'"
+        encoded_filter = urllib.parse.quote(filter_value, safe="=")
+        search_url = f"{users_url}?filter={encoded_filter}"
+        
+        response = requests.get(search_url, headers=headers, timeout=30)
+        
+        if response.status_code == 200:
+            try:
+                if response.text.strip():
+                    data = response.json()
+                    users = data.get('users', [])
+                    if users:
+                        user_id = users[0].get('sourcedId')
+                        return True, user_id, None
+                    else:
+                        return False, None, "User not found"
+                else:
+                    return False, None, "Empty response from API"
+            except (ValueError, requests.exceptions.JSONDecodeError) as json_error:
+                return False, None, f"Invalid JSON response: {str(json_error)}"
+        else:
+            return False, None, f"HTTP {response.status_code}: {response.text}"
+    
+    except Exception as e:
+        return False, None, str(e)
+
+
 def post_student_account(account_payload, access_token):
     """
     Create a student account in TimeBack with retry logic.
@@ -50,6 +99,7 @@ def post_student_account(account_payload, access_token):
     """
     endpoint = os.getenv('TIMEBACK_PLATFORM_REST_ENDPOINT')
     url = f"{endpoint}/rostering/1.0/students"
+    email = account_payload['student']['email']
     
     headers = {
         "Authorization": f"Bearer {access_token}",
@@ -63,19 +113,44 @@ def post_student_account(account_payload, access_token):
             if response.status_code in [200, 201]:
                 # Account created successfully
                 # Extract user_id from response (may be different from payload if account already existed)
-                response_data = response.json()
-                user_id = response_data.get('student', {}).get('sourcedId') or account_payload['student']['sourcedId']
+                # Handle empty or invalid JSON responses
+                try:
+                    if response.text.strip():
+                        response_data = response.json()
+                        user_id = response_data.get('student', {}).get('sourcedId') or account_payload['student']['sourcedId']
+                    else:
+                        # Empty response body - use payload ID
+                        user_id = account_payload['student']['sourcedId']
+                except (ValueError, requests.exceptions.JSONDecodeError) as json_error:
+                    # Invalid JSON response - log the error but still treat as success if status is 200/201
+                    # Use payload ID as fallback
+                    user_id = account_payload['student']['sourcedId']
                 return True, user_id, None
             elif response.status_code == 409:
-                # Account already exists - this is actually a success case
-                # The API might return the existing user_id in the response
-                try:
-                    response_data = response.json()
-                    user_id = response_data.get('student', {}).get('sourcedId') or account_payload['student']['sourcedId']
+                # Account already exists - look up the actual user_id by email
+                success, user_id, lookup_error = get_user_id_by_email(email, access_token)
+                if success:
                     return True, user_id, None
-                except:
-                    # If we can't extract user_id, use the one from payload
+                else:
+                    # Fallback to payload ID if lookup fails
                     return True, account_payload['student']['sourcedId'], None
+            elif response.status_code == 400:
+                # Check if error is due to account already existing (some APIs return 400 instead of 409)
+                try:
+                    error_text = response.text.lower() if response.text else ""
+                    if 'already exists' in error_text or 'user with email' in error_text:
+                        # Account already exists - look up the actual user_id by email
+                        success, user_id, lookup_error = get_user_id_by_email(email, access_token)
+                        if success:
+                            return True, user_id, None
+                        else:
+                            # Fallback to payload ID if lookup fails
+                            return True, account_payload['student']['sourcedId'], None
+                except:
+                    pass
+                # Other 400 errors are failures
+                error_msg = f"HTTP {response.status_code}: {response.text}"
+                return False, None, error_msg
             else:
                 # Account creation failed
                 error_msg = f"HTTP {response.status_code}: {response.text}"

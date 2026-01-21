@@ -95,17 +95,17 @@ def filter_blacklisted_emails(df_leads):
 
 def filter_leads_by_grade_level(df_leads):
     """
-    Filter out leads whose current grade level is not within acceptable ranges.
+    Filter out leads whose current grade level is not within their segment's acceptable range.
     
     Reads grade level ranges from the main_config worksheet (min_grade and max_grade).
     HubSpot provides last completed grade level, so current grade = last completed + 1.
-    Only keeps leads where current grade falls within at least one acceptable range.
+    Only keeps leads where current grade falls within their specific segment's grade range.
     
     Args:
         df_leads: DataFrame containing leads from HubSpot
         
     Returns:
-        DataFrame containing only leads with acceptable grade levels
+        DataFrame containing only leads with acceptable grade levels for their segment
     """
     # Authenticate and get grade level ranges from Google Sheets
     client = authenticate_google_sheets()
@@ -113,29 +113,39 @@ def filter_leads_by_grade_level(df_leads):
     config_worksheet = get_worksheet(spreadsheet, worksheet_name='main_config')
     df_config = read_worksheet_to_dataframe(config_worksheet, header_row=0)
     
-    # Get min_grade and max_grade columns
-    min_grades = df_config['min_grade'].dropna().astype(int).tolist()
-    max_grades = df_config['max_grade'].dropna().astype(int).tolist()
-    
-    # Create list of acceptable grade ranges
-    acceptable_ranges = list(zip(min_grades, max_grades))
+    # Create a dictionary mapping segment to (min_grade, max_grade)
+    segment_grade_ranges = {}
+    for _, row in df_config.iterrows():
+        segment = row.get('segment')
+        min_grade = row.get('min_grade')
+        max_grade = row.get('max_grade')
+        if segment and pd.notna(min_grade) and pd.notna(max_grade):
+            segment_grade_ranges[segment] = (int(min_grade), int(max_grade))
     
     # Get last completed grade level from leads (hs_StudentGradeNum)
     # Calculate current grade = last completed + 1
     last_completed_grade = pd.to_numeric(df_leads['hs_StudentGradeNum'], errors='coerce')
     current_grade = last_completed_grade + 1
     
-    # Check if current grade falls within any acceptable range
-    def is_grade_acceptable(grade):
-        if pd.isna(grade):
-            return False
-        for min_grade, max_grade in acceptable_ranges:
-            if min_grade <= grade <= max_grade:
-                return True
-        return False
+    # Get segment name for each lead
+    segment_name = df_leads.get('segment_name', pd.Series([None] * len(df_leads)))
     
-    # Filter leads where current grade is within acceptable ranges
-    mask = current_grade.apply(is_grade_acceptable)
+    # Create a mask to filter leads where current grade is within their segment's acceptable range
+    mask = pd.Series([False] * len(df_leads), index=df_leads.index)
+    
+    for idx in df_leads.index:
+        grade = current_grade.loc[idx] if idx in current_grade.index else None
+        seg = segment_name.loc[idx] if idx in segment_name.index else None
+        
+        if pd.isna(grade) or pd.isna(seg):
+            continue
+        
+        # Look up the segment's grade range
+        if seg in segment_grade_ranges:
+            min_grade, max_grade = segment_grade_ranges[seg]
+            if min_grade <= grade <= max_grade:
+                mask.loc[idx] = True
+    
     df_filtered_leads = df_leads[mask].copy()
     
     return df_filtered_leads
