@@ -47,13 +47,9 @@ def main():
             print("No leads to process after filtering. Exiting gracefully.")
             # Send notification that automation completed with no leads
             notify_automation_complete(webhook_url, {
-                'total_leads': 0,
-                'accounts_created': 0,
-                'accounts_failed': 0,
-                'apps_assigned': 0,
-                'apps_failed': 0,
-                'assessments_assigned': 0,
-                'assessments_failed': 0,
+                'total_processed': 0,
+                'successful_accounts': 0,
+                'failed_accounts': 0,
                 'success_details': [],
                 'failure_details': []
             }, "0:00:00")
@@ -71,13 +67,9 @@ def main():
             execution_time_seconds = time.time() - start_time
             execution_time = str(timedelta(seconds=int(execution_time_seconds)))
             notify_automation_complete(webhook_url, {
-                'total_leads': total_students,
-                'accounts_created': 0,
-                'accounts_failed': 0,
-                'apps_assigned': 0,
-                'apps_failed': 0,
-                'assessments_assigned': 0,
-                'assessments_failed': 0,
+                'total_processed': total_students,
+                'successful_accounts': 0,
+                'failed_accounts': 0,
                 'success_details': [],
                 'failure_details': []
             }, execution_time)

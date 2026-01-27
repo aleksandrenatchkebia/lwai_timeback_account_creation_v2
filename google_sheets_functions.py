@@ -174,6 +174,7 @@ def copy_spreadsheet(client, source_spreadsheet_id, new_title, destination_folde
     # Build Drive API service
     # Note: For Shared Drives, files created by service accounts use the Shared Drive's quota
     # No domain-wide delegation or ownership transfer needed
+    # Build Drive API service - discovery documents should be cached in google-api-python-client
     drive_service = build('drive', 'v3', credentials=creds)
     
     # Copy the file

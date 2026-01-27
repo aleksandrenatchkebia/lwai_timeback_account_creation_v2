@@ -194,6 +194,7 @@ def create_tracker_copy_by_app(student_email, app_name, signup_date, df_trackers
             if gcp_cred_json:
                 creds_info = json.loads(gcp_cred_json)
                 creds = Credentials.from_service_account_info(creds_info)
+                # Build Drive API service - discovery documents should be cached in google-api-python-client
                 drive_service = build('drive', 'v3', credentials=creds)
                 
                 # Create permission for the student's email

@@ -1,300 +1,472 @@
+#!/usr/bin/env python3
 """
-Deployment script for TimeBack automation Lambda function.
+Deploy TimeBack Lambda function with dependencies split into a Layer.
+This script creates a Lambda Layer for Google dependencies and a smaller main package.
 
-This script packages all Python source files and dependencies,
-creates a deployment ZIP, and uploads it to S3.
+Usage:
+    python3 deploy_to_lambda.py
+
+The script will:
+1. Create a Lambda Layer ZIP with Google dependencies (upload separately to Lambda)
+2. Create a smaller deployment package with source files and lightweight dependencies
+3. Upload main package to S3
+4. Provide instructions for creating the layer and deploying
 """
+
 import os
 import sys
-import shutil
 import zipfile
 import subprocess
-import tempfile
+import shutil
 from pathlib import Path
 
-# S3 Configuration
-S3_BUCKET = 'lwaiexpdata'
-S3_KEY = 'lambda-deployments/lambda_timeback_deployment_with_layers_live_v2.zip'
-ZIP_FILENAME = 'lambda_timeback_deployment_with_layers_live_v2.zip'
-
-# Python source files to include
-PYTHON_FILES = [
-    'lambda_handler.py',
-    'main.py',
-    's3_functions.py',
-    'filter_functions.py',
-    'processing_functions.py',
-    'execution_functions.py',
-    'tracker_functions.py',
-    'hubspot_functions.py',
-    'google_sheets_functions.py',
-    'google_chat_notifications.py',
-    'utils.py',
-    'config.py',
-]
-
-# Dependencies to install (excluding pandas/numpy - these come from Lambda Layers)
-DEPENDENCIES = [
-    'boto3',
-    'requests',
-    'gspread',
-    'gspread-dataframe',
-    'python-dotenv',
-    'google-auth',
-    'google-auth-oauthlib',
-    'google-auth-httplib2',
-    'google-api-python-client',
-]
-
-
-def print_step(message: str):
-    """Print a formatted step message."""
-    print("\n" + "=" * 60)
-    print(f"  {message}")
-    print("=" * 60)
-
-
-def check_requirements():
-    """Check if required tools are available."""
-    print_step("Checking Requirements")
+def create_google_layer():
+    """Create Lambda Layer with Google dependencies."""
+    print("📦 Creating Google dependencies Lambda Layer...")
+    print("="*60)
     
-    # Check Python version
-    python_version = sys.version_info
-    if python_version.major != 3 or python_version.minor < 7:
-        raise RuntimeError(f"Python 3.7+ required, found {python_version.major}.{python_version.minor}")
-    print(f"✓ Python {python_version.major}.{python_version.minor}.{python_version.micro}")
+    # Google authentication dependencies + gspread (all Google-related packages)
+    # Note: Using --no-deps, so we must explicitly list all transitive dependencies
+    google_deps = [
+        'google-auth',
+        'google-auth-oauthlib', 
+        'google-auth-httplib2',
+        'google-api-python-client',
+        'google-api-core',
+        'googleapis-common-protos',
+        'proto-plus',
+        'protobuf',
+        'pyparsing',  # Required by protobuf
+        'uritemplate',
+        'cryptography',
+        'cffi',
+        'pycparser',  # Required by cffi
+        'cachetools',  # Required by google-auth
+        'pyasn1',  # Required by pyasn1-modules
+        'pyasn1-modules',  # Required by google-auth
+        'rsa',  # Required by google-auth
+        'urllib3',  # Required by requests and other packages
+        'requests_oauthlib',  # Required by google-auth-oauthlib
+        'oauthlib',  # Required by requests_oauthlib
+        'httplib2',  # Required by google-auth-httplib2
+        'six',  # Required by many packages
+        'requests',  # Required by google-api-core (needed in layer, not main package)
+        'certifi',  # Required by requests
+        'charset-normalizer',  # Required by requests
+        'idna',  # Required by urllib3/requests
+        'packaging',  # Often required by various packages
+        'gspread',  # Depends on google-auth, so put in layer
+        'gspread-dataframe'  # Depends on gspread
+    ]
     
-    # Check if pip is available
-    try:
-        subprocess.run(['pip', '--version'], check=True, capture_output=True)
-        print("✓ pip available")
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        raise RuntimeError("pip not found. Please install pip.")
+    layer_name = 'lambda_timeback_google_layer.zip'
+    temp_layer_dir = 'temp_layer'
+    python_dir = os.path.join(temp_layer_dir, 'python', 'lib', 'python3.10', 'site-packages')
     
-    # Check if AWS CLI is available (for S3 upload)
-    try:
-        subprocess.run(['aws', '--version'], check=True, capture_output=True)
-        print("✓ AWS CLI available")
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("⚠ AWS CLI not found. You'll need to upload the ZIP manually.")
+    # Clean up any existing temp directory
+    if os.path.exists(temp_layer_dir):
+        shutil.rmtree(temp_layer_dir)
     
-    # Check if source files exist
-    missing_files = []
-    for file in PYTHON_FILES:
-        if not os.path.exists(file):
-            missing_files.append(file)
-    
-    if missing_files:
-        raise RuntimeError(f"Missing source files: {', '.join(missing_files)}")
-    print(f"✓ All {len(PYTHON_FILES)} source files found")
-
-
-def create_deployment_package():
-    """Create the deployment ZIP package."""
-    print_step("Creating Deployment Package")
-    
-    # Create temporary directory for packaging
-    temp_dir = tempfile.mkdtemp(prefix='lambda_deploy_')
-    print(f"Using temporary directory: {temp_dir}")
+    os.makedirs(python_dir, exist_ok=True)
     
     try:
-        # Copy Python source files
-        print("\nCopying Python source files...")
-        for file in PYTHON_FILES:
-            if os.path.exists(file):
-                dest_path = os.path.join(temp_dir, file)
-                shutil.copy2(file, dest_path)
-                print(f"  ✓ {file}")
-            else:
-                print(f"  ⚠ {file} not found (skipping)")
-        
-        # Install dependencies
-        print("\nInstalling dependencies...")
-        requirements_file = os.path.join(temp_dir, 'requirements.txt')
-        with open(requirements_file, 'w') as f:
-            f.write('\n'.join(DEPENDENCIES))
-        
-        print(f"  Installing {len(DEPENDENCIES)} packages...")
+        # Install Google packages together to ensure namespace packages work correctly
+        print("   Installing Google packages...")
         install_cmd = [
-            sys.executable, '-m', 'pip', 'install',
-            '-r', requirements_file,
-            '-t', temp_dir,
-            '--quiet',
-            '--upgrade'
-        ]
+            sys.executable, '-m', 'pip', 'install', 
+            '--target', python_dir, 
+            '--platform', 'manylinux2014_x86_64',
+            '--python-version', '310',
+            '--only-binary=:all:',
+            '--no-deps'
+        ] + google_deps
         
         try:
-            result = subprocess.run(
-                install_cmd,
-                check=True,
-                capture_output=True,
-                text=True
-            )
-            print("  ✓ Dependencies installed")
+            subprocess.run(install_cmd, check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError as e:
-            print(f"  ⚠ Warning: Some dependencies may have failed to install")
-            print(f"    Error: {e.stderr}")
-            print(f"    Continuing with available packages...")
+            print(f"      ❌ Failed to install Google packages, trying fallback...")
+            fallback_cmd = [
+                sys.executable, '-m', 'pip', 'install',
+                '--target', python_dir,
+                '--platform', 'manylinux2014_x86_64',
+                '--python-version', '310',
+                '--no-deps'
+            ] + google_deps
+            subprocess.run(fallback_cmd, check=True, capture_output=True, text=True)
         
-        # Create ZIP file
-        print(f"\nCreating ZIP file: {ZIP_FILENAME}")
-        zip_path = os.path.join(os.getcwd(), ZIP_FILENAME)
+        # Verify critical packages
+        print("\n🔍 Verifying packages in layer...")
+        critical_checks = {
+            'google-api-core': os.path.join(python_dir, 'google', 'api_core'),
+            'google-auth': os.path.join(python_dir, 'google', 'auth'),
+            'googleapiclient': os.path.join(python_dir, 'googleapiclient'),
+            'gspread': os.path.join(python_dir, 'gspread'),
+            'certifi': os.path.join(python_dir, 'certifi'),
+        }
+        for pkg_name, check_path in critical_checks.items():
+            if os.path.exists(check_path):
+                print(f"   ✅ {pkg_name} found")
+                # Special check for certifi - verify cacert.pem exists
+                if pkg_name == 'certifi':
+                    cert_file = os.path.join(check_path, 'cacert.pem')
+                    if os.path.exists(cert_file):
+                        print(f"      ✅ certifi/cacert.pem found ({os.path.getsize(cert_file) / 1024:.1f} KB)")
+                    else:
+                        print(f"      ⚠️  certifi/cacert.pem NOT found!")
+            else:
+                print(f"   ⚠️  {pkg_name} not found at {check_path}")
         
-        # Remove existing ZIP if it exists
-        if os.path.exists(zip_path):
-            os.remove(zip_path)
-            print(f"  Removed existing {ZIP_FILENAME}")
+        # Create layer ZIP (optimized - exclude unnecessary files but include data files)
+        print("\n📦 Creating optimized layer ZIP...")
+        # Exclude patterns - but be careful not to exclude actual package modules
+        # Don't exclude directories that are part of package names (like pyparsing/testing)
+        excluded_patterns = [
+            '__pycache__',
+            '.dist-info',
+            '.egg-info',
+            '/tests/',  # Only exclude /tests/ directories, not "testing" modules
+            '/test/',   # Only exclude /test/ directories
+            '/docs/',   # Only exclude /docs/ directories, not "documents"
+            '/doc/',    # Only exclude /doc/ directories, not "documents"
+            '.txt',  # Exclude README, LICENSE, etc. (but keep .py files)
+            '.md',
+            '.rst',
+            '.yml',
+            '.yaml',
+            '.toml',
+            '.cfg',
+            '.ini',
+            'PKG-INFO',
+            'METADATA',
+            'RECORD',
+            'SOURCES.txt',
+            'top_level.txt',
+            'WHEEL',
+            'INSTALLER'
+        ]
         
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            # Add all files from temp directory
-            for root, dirs, files in os.walk(temp_dir):
-                # Skip __pycache__ and .pyc files
-                dirs[:] = [d for d in dirs if d != '__pycache__']
-                files = [f for f in files if not f.endswith('.pyc')]
+        # Essential file types to include
+        included_extensions = ['.py', '.so', '.pyi', '.pem', '.json']  # Added .pem for certifi, .json for discovery cache
+        
+        # Critical data files/directories that must be included
+        critical_paths = [
+            'certifi/cacert.pem',  # Certificate bundle for SSL
+            'googleapiclient/discovery_cache',  # API discovery documents (needed for build('drive', 'v3'))
+        ]
+        
+        with zipfile.ZipFile(layer_name, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, dirs, files in os.walk(temp_layer_dir):
+                # Skip excluded directories
+                dirs[:] = [d for d in dirs if not any(pattern in d for pattern in excluded_patterns)]
                 
                 for file in files:
                     file_path = os.path.join(root, file)
-                    arc_name = os.path.relpath(file_path, temp_dir)
-                    zipf.write(file_path, arc_name)
-                    print(f"  ✓ Added: {arc_name}")
+                    arc_path = os.path.relpath(file_path, temp_layer_dir)
+                    
+                    # Skip if path contains excluded patterns
+                    if any(pattern in arc_path for pattern in excluded_patterns):
+                        continue
+                    
+                    # Skip cache files
+                    if file.endswith('.pyc') or file.endswith('.pyo'):
+                        continue
+                    
+                    # Always include critical files (like certifi's certificate bundle and discovery cache)
+                    is_critical = any(critical in arc_path for critical in critical_paths)
+                    
+                    # Check file extension
+                    file_ext = os.path.splitext(file)[1]
+                    
+                    # Include only necessary discovery cache JSON files (Drive API v3 only)
+                    # We only need drive.v3.json, not all 569 API discovery documents
+                    is_discovery_cache_json = 'discovery_cache' in arc_path and file_ext == '.json'
+                    is_drive_v3 = 'drive.v3.json' in file or 'drive.v3' in arc_path
+                    
+                    # Exclude discovery cache JSON files that aren't Drive v3
+                    if is_discovery_cache_json and not is_drive_v3:
+                        continue  # Skip all other discovery cache JSON files
+                    
+                    # Include if:
+                    # 1. It's a critical file (like certifi certificate or discovery cache)
+                    # 2. It has an included extension (.py, .so, .pyi, .pem, .json)
+                    # 3. It's __init__.py (no extension but essential)
+                    # 4. It's the Drive API v3 discovery cache JSON file (only this one)
+                    if is_discovery_cache_json and is_drive_v3:
+                        # Only include Drive API v3 discovery document
+                        zipf.write(file_path, arc_path)
+                    elif is_critical or file_ext in included_extensions or file == '__init__.py':
+                        # For files without extension that aren't __init__.py, check if they're data files
+                        if not file_ext and file != '__init__.py':
+                            # Include if it's in certifi directory (might be data files)
+                            if 'certifi' in arc_path.lower():
+                                zipf.write(file_path, arc_path)
+                            else:
+                                # For other files without extension, check if binary/data
+                                try:
+                                    with open(file_path, 'rb') as f:
+                                        first_bytes = f.read(512)
+                                        # If it's mostly text (printable ASCII), skip it
+                                        if first_bytes and all(b in b'\n\r\t' + bytes(range(32, 127)) for b in first_bytes[:100]):
+                                            continue
+                                        # Otherwise include (might be binary data file)
+                                        zipf.write(file_path, arc_path)
+                                except:
+                                    # If we can't read it, include it to be safe
+                                    zipf.write(file_path, arc_path)
+                        else:
+                            zipf.write(file_path, arc_path)
         
-        zip_size = os.path.getsize(zip_path) / (1024 * 1024)  # Size in MB
-        print(f"\n✓ ZIP file created: {ZIP_FILENAME} ({zip_size:.2f} MB)")
+        layer_size = os.path.getsize(layer_name) / (1024 * 1024)  # MB
+        print(f"✅ Layer created: {layer_name}")
+        print(f"📊 Layer size: {layer_size:.1f} MB")
         
-        return zip_path
-    
-    finally:
-        # Clean up temporary directory
-        print(f"\nCleaning up temporary directory...")
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        print("✓ Cleanup complete")
-
-
-def upload_to_s3(zip_path: str):
-    """Upload the deployment package to S3."""
-    print_step("Uploading to S3")
-    
-    s3_uri = f"s3://{S3_BUCKET}/{S3_KEY}"
-    print(f"Uploading to: {s3_uri}")
-    
-    try:
-        # Use AWS CLI to upload
-        upload_cmd = [
-            'aws', 's3', 'cp',
-            zip_path,
-            s3_uri
+        # Verify critical imports work (test that modules can be imported)
+        print("\n🔍 Testing critical imports...")
+        test_imports = [
+            'google.api_core',
+            'google.auth',
+            'certifi',
+            'pyparsing',  # Test that pyparsing and its submodules are available
         ]
         
-        result = subprocess.run(
-            upload_cmd,
-            check=True,
-            capture_output=True,
-            text=True
-        )
+        # Temporarily add python_dir to path for testing
+        original_path = sys.path[:]
+        sys.path.insert(0, python_dir)
         
-        print(f"✓ Upload successful!")
-        print(f"  S3 URI: {s3_uri}")
+        failed_imports = []
+        try:
+            for module_name in test_imports:
+                try:
+                    __import__(module_name)
+                    print(f"   ✅ {module_name}")
+                except ImportError as e:
+                    print(f"   ❌ {module_name}: {e}")
+                    failed_imports.append(module_name)
+            
+            # Test pyparsing.testing specifically (this was previously excluded)
+            try:
+                import pyparsing.testing
+                print(f"   ✅ pyparsing.testing")
+            except ImportError as e:
+                print(f"   ❌ pyparsing.testing: {e}")
+                failed_imports.append('pyparsing.testing')
+            
+            # Test gspread (may fail on macOS due to Linux binaries, but that's OK)
+            try:
+                import gspread
+                print(f"   ✅ gspread")
+            except Exception as e:
+                # On macOS, this may fail due to Linux .so files, but will work in Lambda
+                if 'mach-o' in str(e).lower() or 'slice' in str(e).lower():
+                    print(f"   ⚠️  gspread (expected macOS/Linux mismatch, will work in Lambda)")
+                else:
+                    print(f"   ❌ gspread: {e}")
+                    failed_imports.append('gspread')
+        finally:
+            # Restore original path
+            sys.path[:] = original_path
         
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Upload failed!")
-        print(f"  Error: {e.stderr}")
-        print(f"\n  Manual upload command:")
-        print(f"  aws s3 cp {zip_path} {s3_uri}")
-        raise
-    except FileNotFoundError:
-        print("⚠ AWS CLI not found. Skipping upload.")
-        print(f"\n  Please upload manually:")
-        print(f"  aws s3 cp {zip_path} {s3_uri}")
-        print(f"\n  Or use the AWS Console to upload:")
-        print(f"  Bucket: {S3_BUCKET}")
-        print(f"  Key: {S3_KEY}")
-
-
-def print_deployment_instructions():
-    """Print instructions for Lambda configuration."""
-    print_step("Lambda Configuration Instructions")
+        if failed_imports:
+            print(f"\n⚠️  Warning: {len(failed_imports)} imports failed. Layer may not work correctly.")
+        else:
+            print(f"\n✅ All critical imports successful!")
+        
+        return layer_name
     
-    instructions = f"""
-1. Handler Configuration:
-   Handler: lambda_handler.lambda_handler
-   Runtime: Python 3.9 or Python 3.10
-   Timeout: 15 minutes (900 seconds)
-   Memory: 1024 MB
+    finally:
+        # Clean up temp directory
+        if os.path.exists(temp_layer_dir):
+            shutil.rmtree(temp_layer_dir)
 
-2. Environment Variables:
-   Set the following in Lambda configuration:
-   - TIMEBACK_PLATFORM_REST_ENDPOINT
-   - TIMEBACK_PLATFORM_CLIENT_ID
-   - TIMEBACK_PLATFORM_CLIENT_SECRET
-   - GCP_CRED (full JSON string)
-   - HUBSPOT_ACCESS_TOKEN (or HUBSPOT_CLIENT + HUBSPOT_SECRET)
-   - GOOGLE_CHAT_WEBHOOK_URL (optional, from config.py)
-   - APP_IDS_GSHEET (optional, from config.py)
-   - PROGRAM_TRACKERS_FOLDER (optional, from config.py)
-   - HUBSPOT_TRACKER_PROPERTY (optional, from config.py)
 
-3. Lambda Layers:
-   Add a Lambda Layer with pandas and numpy:
-   - ARN: Use a public layer or create your own
-   - Example: arn:aws:lambda:us-east-1:336392948345:layer:AWSSDKPandas-Python39:1
-   - Or use: https://github.com/keithrozario/Klayers
-
-4. IAM Permissions:
-   Ensure Lambda execution role has:
-   - s3:GetObject on bucket 'lwaiexpdata'
-   - logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents
-
-5. S3 Deployment Package:
-   Location: s3://{S3_BUCKET}/{S3_KEY}
-   Use this S3 location when creating/updating the Lambda function.
-
-6. Testing:
-   Test locally: python lambda_handler.py
-   Test in Lambda: Use a test event (empty JSON: {{}})
-"""
+def deploy_to_lambda():
+    """Create Lambda layer and deployment package."""
     
-    print(instructions)
-
-
-def main():
-    """Main deployment function."""
-    print("\n" + "=" * 60)
-    print("  TimeBack Automation Lambda Deployment")
-    print("=" * 60)
+    print("🚀 Creating TimeBack Lambda deployment package with Layer...")
+    print("="*60)
+    
+    # Step 1: Create Google dependencies layer
+    print("\n" + "="*60)
+    layer_name = create_google_layer()
+    
+    # Step 2: Create main deployment package (without Google deps)
+    print("\n" + "="*60)
+    
+    # Source files to include
+    source_files = [
+        'lambda_handler.py',
+        'main.py',
+        's3_functions.py',
+        'filter_functions.py',
+        'processing_functions.py',
+        'execution_functions.py',
+        'tracker_functions.py',
+        'hubspot_functions.py',
+        'google_sheets_functions.py',
+        'google_chat_notifications.py',
+        'utils.py',
+        'config.py',
+    ]
+    
+    # Lightweight dependencies (boto3 and requests are in Layer, only minimal deps here)
+    lightweight_deps = [
+        'python-dotenv'  # boto3 is already available in Lambda runtime, requests is in Google layer
+    ]
+    
+    # Create deployment package
+    package_name = 'lambda_timeback_deployment_with_layers_live_v2.zip'
+    
+    with zipfile.ZipFile(package_name, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        # Add source files
+        print("📁 Adding source files...")
+        for file_path in source_files:
+            if Path(file_path).exists():
+                print(f"   ✅ {file_path}")
+                zipf.write(file_path, file_path)
+            else:
+                print(f"   ⚠️  {file_path} (not found)")
+        
+        # Install dependencies to temp directory
+        print("\n📦 Installing dependencies...")
+        temp_dir = 'temp_deps'
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        try:
+            # Install lightweight deps only (Google deps are in the Layer)
+            print("   Installing lightweight dependencies...")
+            for dep in lightweight_deps:
+                print(f"   📦 {dep}...")
+                install_cmd = [
+                    sys.executable, '-m', 'pip', 'install', 
+                    '--target', temp_dir, 
+                    '--platform', 'manylinux2014_x86_64',
+                    '--python-version', '310',
+                    '--only-binary=:all:',
+                    '--no-deps',
+                    dep
+                ]
+                try:
+                    subprocess.run(install_cmd, check=True, capture_output=True, text=True)
+                except subprocess.CalledProcessError as e:
+                    print(f"      ❌ Failed to install {dep}, trying fallback...")
+                    fallback_cmd = [
+                        sys.executable, '-m', 'pip', 'install',
+                        '--target', temp_dir,
+                        '--platform', 'manylinux2014_x86_64',
+                        '--python-version', '310',
+                        '--no-deps',
+                        dep
+                    ]
+                    subprocess.run(fallback_cmd, check=True, capture_output=True, text=True)
+            
+            # Add dependencies to zip (include all necessary files, preserve package structure)
+            print("\n📦 Adding dependencies to package...")
+            for root, dirs, files in os.walk(temp_dir):
+                # Skip numpy and pandas directories
+                dirs[:] = [d for d in dirs if d not in ['numpy', 'pandas', 'numpy.libs', 'pandas.libs', '__pycache__']]
+                
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    arc_path = os.path.relpath(file_path, temp_dir)
+                    
+                    # Skip numpy and pandas files
+                    if 'numpy' in arc_path.lower() or 'pandas' in arc_path.lower():
+                        continue
+                    
+                    # Skip cache files
+                    if file.endswith('.pyc') or file.endswith('.pyo'):
+                        continue
+                    
+                    # Skip .dist-info and .egg-info directories
+                    if '.dist-info' in arc_path or '.egg-info' in arc_path:
+                        continue
+                    
+                    # Include all other files (.py, .so, .pyi, data files, etc.)
+                    zipf.write(file_path, arc_path)
+        
+        finally:
+            # Clean up temp directory
+            import shutil
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+    
+    # Get package size
+    package_size = os.path.getsize(package_name) / (1024 * 1024)  # MB
+    
+    print(f"\n✅ Deployment package created: {package_name}")
+    print(f"📊 Package size: {package_size:.1f} MB")
+    
+    if package_size > 250:  # Lambda limit is ~250MB
+        print(f"⚠️  Package size is close to Lambda limits")
+    else:
+        print(f"✅ Package size is within Lambda limits")
+    
+    # Upload main package to S3
+    print(f"\n☁️  Uploading main package to S3...")
+    s3_key = "lambda-deployments/lambda_timeback_deployment_with_layers_live_v2.zip"
     
     try:
-        # Check requirements
-        check_requirements()
-        
-        # Create deployment package
-        zip_path = create_deployment_package()
-        
-        # Upload to S3
-        try:
-            upload_to_s3(zip_path)
-        except Exception as e:
-            print(f"\n⚠ Upload failed, but ZIP file is ready: {zip_path}")
-            print("  You can upload it manually.")
-        
-        # Print instructions
-        print_deployment_instructions()
-        
-        print("\n" + "=" * 60)
-        print("  Deployment Package Ready!")
-        print("=" * 60)
-        print(f"\nZIP file: {zip_path}")
-        print(f"S3 location: s3://{S3_BUCKET}/{S3_KEY}")
-        print("\n✓ Deployment script completed successfully!")
-        
+        import boto3
+        s3_client = boto3.client('s3')
+        s3_client.upload_file(package_name, 'lwaiexpdata', s3_key)
+        print(f"✅ Uploaded to s3://lwaiexpdata/{s3_key}")
     except Exception as e:
-        print("\n" + "=" * 60)
-        print("  ❌ Deployment Failed!")
-        print("=" * 60)
-        print(f"Error: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+        print(f"❌ S3 upload failed: {e}")
+        print(f"📁 Package is ready locally: {package_name}")
+        return False
+    
+    # Upload layer to S3
+    print(f"\n☁️  Uploading layer to S3...")
+    layer_s3_key = "lambda-deployments/lambda_timeback_google_layer.zip"
+    
+    try:
+        s3_client.upload_file(layer_name, 'lwaiexpdata', layer_s3_key)
+        print(f"✅ Layer uploaded to s3://lwaiexpdata/{layer_s3_key}")
+    except Exception as e:
+        print(f"❌ Layer upload failed: {e}")
+        print(f"📁 Layer is ready locally: {layer_name}")
+        return False
+    
+    # Clean up local packages
+    os.remove(package_name)
+    os.remove(layer_name)
+    print(f"🧹 Cleaned up local packages")
+    
+    print(f"\n🎉 Deployment complete!")
+    print(f"="*60)
+    print(f"📝 Next steps:")
+    print(f"\n1️⃣  CREATE THE LAYER FIRST:")
+    print(f"   1. Go to AWS Lambda Console → Layers")
+    print(f"   2. Click 'Create layer'")
+    print(f"   3. Name: timeback-google-dependencies")
+    print(f"   4. Upload from S3: s3://lwaiexpdata/{layer_s3_key}")
+    print(f"   5. Compatible runtimes: Python 3.10")
+    print(f"   6. Click 'Create'")
+    print(f"   7. Copy the Layer ARN (you'll need it)")
+    print(f"\n2️⃣  UPDATE YOUR LAMBDA FUNCTION:")
+    print(f"   1. Go to Lambda Console → Functions → timeback-account-creation-automation")
+    print(f"   2. Scroll to 'Layers' section")
+    print(f"   3. Click 'Add a layer'")
+    print(f"   4. Select 'Custom layers'")
+    print(f"   5. Choose 'timeback-google-dependencies'")
+    print(f"   6. Version: Latest")
+    print(f"   7. Click 'Add'")
+    print(f"   8. Also ensure pandas/numpy layer is attached")
+    print(f"\n3️⃣  UPDATE FUNCTION CODE:")
+    print(f"   1. Go to 'Code' tab")
+    print(f"   2. Click 'Upload from' → 'Amazon S3 location'")
+    print(f"   3. Enter: s3://lwaiexpdata/{s3_key}")
+    print(f"   4. Click 'Save'")
+    print(f"   5. Test the function")
+    print(f"\n📋 Lambda Configuration:")
+    print(f"   - Handler: lambda_handler.lambda_handler")
+    print(f"   - Runtime: Python 3.10")
+    print(f"   - Timeout: 15 minutes")
+    print(f"   - Memory: 1024 MB")
+    print(f"   - Layers: timeback-google-dependencies + pandas/numpy layer")
+    
+    return True
 
-
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    success = deploy_to_lambda()
+    sys.exit(0 if success else 1)

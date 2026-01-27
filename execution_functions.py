@@ -411,6 +411,9 @@ def execute_and_log(all_results, skip_account_creation=False):
     """
     Main function to execute API calls and flush logs.
     
+    IMPORTANT: Tracker creation happens FIRST. If tracker creation fails,
+    the student is skipped entirely (no account creation, no app/assessment assignments).
+    
     Args:
         all_results: List of result dictionaries from processing phase
         skip_account_creation: If True, skip TimeBack account creation but still create trackers
@@ -418,54 +421,8 @@ def execute_and_log(all_results, skip_account_creation=False):
     Returns:
         tuple: (summary: dict, success_logs: list, fail_logs: list, tracker_results: list, student_data_dict: dict)
     """
-    if skip_account_creation:
-        print("TESTING MODE: Skipping TimeBack account creation...")
-        # Create mock success_logs from all_results for tracker creation
-        success_logs = []
-        for result in all_results:
-            if result.get('account_payload'):  # Only include if payload was prepared
-                success_logs.append({
-                    'timestamp': datetime.now().isoformat(),
-                    'email': result.get('email', 'Unknown'),
-                    'segment': result.get('segment', 'Unknown'),
-                    'grade': result.get('grade', 'Unknown'),
-                    'app_name': result.get('app_name', 'Unknown'),
-                    'user_id': 'test-mode-no-account-created',
-                    'apps_assigned': 1 if result.get('app_assignment') else 0,
-                    'assessments_assigned': len(result.get('assessment_assignments', []))
-                })
-        fail_logs = []
-        summary = {
-            'accounts_created': 0,
-            'accounts_failed': 0,
-            'apps_assigned': 0,
-            'apps_failed': 0,
-            'assessments_assigned': 0,
-            'assessments_failed': 0
-        }
-        print(f"  Mocked {len(success_logs)} successful account creations for testing")
-    else:
-        print("Executing API calls...")
-        success_logs, fail_logs, summary = execute_api_calls(all_results)
-    
-    if not skip_account_creation:
-        print(f"\nExecution Summary:")
-        print(f"  Accounts created: {summary['accounts_created']}")
-        print(f"  Accounts failed: {summary['accounts_failed']}")
-        print(f"  Apps assigned: {summary['apps_assigned']}")
-        print(f"  Apps failed: {summary['apps_failed']}")
-        print(f"  Assessments assigned: {summary['assessments_assigned']}")
-        print(f"  Assessments failed: {summary['assessments_failed']}")
-        
-        print("\nFlushing logs to Google Sheets...")
-        flush_logs(success_logs, fail_logs)
-        print(f"  Success logs written: {len(success_logs)}")
-        print(f"  Failure logs written: {len(fail_logs)}")
-    else:
-        print("\nTESTING MODE: Skipping log writes to Google Sheets")
-    
-    # Create tracker spreadsheets for successfully created accounts
-    print("\nCreating tracker spreadsheets...")
+    # STEP 1: Create trackers FIRST (before account creation)
+    print("\nCreating tracker spreadsheets (pre-validation)...")
     from tracker_functions import create_trackers_for_students, write_trackers_to_sheet
     from google_sheets_functions import authenticate_google_sheets, open_spreadsheet, get_worksheet, read_worksheet_to_dataframe
     
@@ -492,27 +449,129 @@ def execute_and_log(all_results, skip_account_creation=False):
                 'first_name': result.get('first_name')  # Fallback for name
             }
     
-    tracker_results = create_trackers_for_students(success_logs, student_data_dict, config_df)
+    # Create mock success_logs for tracker creation (we need the structure)
+    mock_success_logs = []
+    for result in all_results:
+        if result.get('account_payload'):  # Only include if payload was prepared
+            mock_success_logs.append({
+                'timestamp': datetime.now().isoformat(),
+                'email': result.get('email', 'Unknown'),
+                'segment': result.get('segment', 'Unknown'),
+                'grade': result.get('grade', 'Unknown'),
+                'app_name': result.get('app_name', 'Unknown'),
+                'user_id': 'pre-validation',  # Placeholder
+                'apps_assigned': 1 if result.get('app_assignment') else 0,
+                'assessments_assigned': len(result.get('assessment_assignments', []))
+            })
     
-    successful_trackers = sum(1 for tr in tracker_results if tr['success'])
-    failed_trackers = sum(1 for tr in tracker_results if not tr['success'])
+    # Try to create trackers for all students
+    tracker_results = create_trackers_for_students(mock_success_logs, student_data_dict, config_df)
+    
+    # Filter all_results to only include students where tracker creation succeeded
+    successful_tracker_emails = {tr['email'] for tr in tracker_results if tr['success']}
+    failed_tracker_emails = {tr['email'] for tr in tracker_results if not tr['success']}
+    
+    successful_trackers = len(successful_tracker_emails)
+    failed_trackers = len(failed_tracker_emails)
     
     print(f"  Trackers created: {successful_trackers}")
     print(f"  Trackers failed: {failed_trackers}")
     
+    # Log tracker failures to fail_logs
+    tracker_fail_logs = []
     if failed_trackers > 0:
-        print("\n  Tracker creation errors:")
+        print("\n  ⚠️  Tracker creation errors (these students will be skipped):")
         for tr in tracker_results:
             if not tr['success']:
-                print(f"    - {tr.get('email', 'Unknown')}: {tr.get('error', 'Unknown error')}")
+                error_msg = tr.get('error', 'Unknown error')
+                email = tr.get('email', 'Unknown')
+                print(f"    - {email}: {error_msg}")
+                # Get segment and grade from all_results for better logging
+                segment = 'Unknown'
+                grade = None
+                for result in all_results:
+                    if result.get('email') == email:
+                        segment = result.get('segment', 'Unknown')
+                        grade = result.get('grade')
+                        break
+                tracker_fail_logs.append({
+                    'timestamp': datetime.now().isoformat(),
+                    'email': email,
+                    'segment': segment,
+                    'grade': grade,
+                    'step': 'tracker_creation',
+                    'error': error_msg
+                })
     
-    # Write trackers to all_trackers worksheet in batch
+    # Filter all_results to only include students with successful tracker creation
+    filtered_results = [r for r in all_results if r.get('email') in successful_tracker_emails]
+    
+    if len(filtered_results) < len(all_results):
+        skipped_count = len(all_results) - len(filtered_results)
+        print(f"\n  ⚠️  Skipping {skipped_count} student(s) due to tracker creation failures")
+    
+    # STEP 2: Only create accounts for students with successful trackers
+    if skip_account_creation:
+        print("\nTESTING MODE: Skipping TimeBack account creation...")
+        # Create mock success_logs from filtered_results
+        success_logs = []
+        for result in filtered_results:
+            if result.get('account_payload'):
+                success_logs.append({
+                    'timestamp': datetime.now().isoformat(),
+                    'email': result.get('email', 'Unknown'),
+                    'segment': result.get('segment', 'Unknown'),
+                    'grade': result.get('grade', 'Unknown'),
+                    'app_name': result.get('app_name', 'Unknown'),
+                    'user_id': 'test-mode-no-account-created',
+                    'apps_assigned': 1 if result.get('app_assignment') else 0,
+                    'assessments_assigned': len(result.get('assessment_assignments', []))
+                })
+        fail_logs = []
+        summary = {
+            'accounts_created': 0,
+            'accounts_failed': 0,
+            'apps_assigned': 0,
+            'apps_failed': 0,
+            'assessments_assigned': 0,
+            'assessments_failed': 0
+        }
+        print(f"  Mocked {len(success_logs)} successful account creations for testing")
+    else:
+        print("\nExecuting API calls (only for students with successful trackers)...")
+        success_logs, fail_logs, summary = execute_api_calls(filtered_results)
+    
+    if not skip_account_creation:
+        print(f"\nExecution Summary:")
+        print(f"  Accounts created: {summary['accounts_created']}")
+        print(f"  Accounts failed: {summary['accounts_failed']}")
+        print(f"  Apps assigned: {summary['apps_assigned']}")
+        print(f"  Apps failed: {summary['apps_failed']}")
+        print(f"  Assessments assigned: {summary['assessments_assigned']}")
+        print(f"  Assessments failed: {summary['assessments_failed']}")
+        
+        print("\nFlushing logs to Google Sheets...")
+        # Combine tracker failures with account/app/assessment failures
+        all_fail_logs = tracker_fail_logs + fail_logs
+        flush_logs(success_logs, all_fail_logs)
+        print(f"  Success logs written: {len(success_logs)}")
+        print(f"  Failure logs written: {len(all_fail_logs)} (including {len(tracker_fail_logs)} tracker failures)")
+    else:
+        print("\nTESTING MODE: Skipping log writes to Google Sheets")
+        # In testing mode, still write tracker failures
+        if tracker_fail_logs:
+            print(f"\n  Tracker failures logged: {len(tracker_fail_logs)}")
+    
+    # Write successful trackers to all_trackers worksheet in batch
     if successful_trackers > 0:
         print("\nWriting trackers to all_trackers worksheet...")
         write_trackers_to_sheet(tracker_results)
         print(f"  {successful_trackers} trackers written to all_trackers worksheet")
     
-    return summary, success_logs, fail_logs, tracker_results, student_data_dict
+    # Return combined fail_logs (tracker failures + account/app/assessment failures)
+    all_fail_logs = tracker_fail_logs + fail_logs if not skip_account_creation else tracker_fail_logs
+    
+    return summary, success_logs, all_fail_logs, tracker_results, student_data_dict
 
 
 def prepare_summary_data(execution_summary, success_logs, fail_logs, total_processed):
